@@ -1,30 +1,69 @@
 import { getLogos, getMockupsByTitle, driveProxyUrl, LogoItem } from '@/lib/google';
 import LogoGrid from '@/components/LogoGrid';
 
-export const revalidate = 3600; // revalidate tiap 1 jam
+export const revalidate = 3600;
+
+// Env check helper — tampil di UI kalau ada yg missing
+function checkEnvVars() {
+  const required = {
+    GOOGLE_SERVICE_ACCOUNT_JSON: process.env.GOOGLE_SERVICE_ACCOUNT_JSON,
+    GOOGLE_SHEET_ID: process.env.GOOGLE_SHEET_ID,
+    GOOGLE_DRIVE_MOCKUP_FOLDER_ID: process.env.GOOGLE_DRIVE_MOCKUP_FOLDER_ID,
+  };
+  const missing = Object.entries(required)
+    .filter(([, v]) => !v)
+    .map(([k]) => k);
+  return missing;
+}
 
 export default async function Home() {
   let logos: LogoItem[] = [];
+  let errorMessage: string | null = null;
 
-  try {
-    const raw = await getLogos();
-    const mockupFolderId = process.env.GOOGLE_DRIVE_MOCKUP_FOLDER_ID ?? '';
+  // Cek env dulu sebelum fetch
+  const missingEnv = checkEnvVars();
+  if (missingEnv.length > 0) {
+    errorMessage = `Missing env vars: ${missingEnv.join(', ')}`;
+  }
 
-    logos = await Promise.all(
-      raw.map(async (logo) => {
-        const mockupImages = await getMockupsByTitle(logo.title, mockupFolderId);
-        return {
-          ...logo,
-          mockupImages: mockupImages.map((f) => ({
-            ...f,
-            thumbnailLink: driveProxyUrl(f.id),
-            webContentLink: driveProxyUrl(f.id),
-          })),
-        };
-      })
-    );
-  } catch (err) {
-    console.error('Failed to load logos:', err);
+  if (!errorMessage) {
+    try {
+      // Validasi JSON service account bisa di-parse
+      JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON!);
+    } catch {
+      errorMessage = 'GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON';
+    }
+  }
+
+  if (!errorMessage) {
+    try {
+      const raw = await getLogos();
+      const mockupFolderId = process.env.GOOGLE_DRIVE_MOCKUP_FOLDER_ID ?? '';
+
+      logos = await Promise.all(
+        raw.map(async (logo) => {
+          try {
+            const mockupImages = await getMockupsByTitle(logo.title, mockupFolderId);
+            return {
+              ...logo,
+              mockupImages: mockupImages.map((f) => ({
+                ...f,
+                thumbnailLink: driveProxyUrl(f.id),
+                webContentLink: driveProxyUrl(f.id),
+              })),
+            };
+          } catch (mockupErr) {
+            // Mockup gagal → tetap tampil logo tanpa mockup
+            console.warn(`Mockup fetch failed for "${logo.title}":`, mockupErr);
+            return { ...logo, mockupImages: [] };
+          }
+        })
+      );
+    } catch (err) {
+      const e = err as Error;
+      errorMessage = e.message ?? 'Unknown error fetching logos';
+      console.error('[VibeLogo] getLogos error:', e);
+    }
   }
 
   return (
@@ -49,12 +88,25 @@ export default async function Home() {
         </p>
       </section>
 
+      {/* Error Banner — visible di UI, bukan cuma di logs */}
+      {errorMessage && (
+        <section className="px-4 pb-6 max-w-3xl mx-auto">
+          <div className="border border-red-500/30 bg-red-500/10 rounded-xl p-4">
+            <p className="text-red-400 text-xs font-semibold uppercase tracking-wider mb-1">Error</p>
+            <p className="text-red-300 text-sm font-mono break-all">{errorMessage}</p>
+            <p className="text-white/30 text-xs mt-2">
+              Check Vercel → Settings → Environment Variables, then redeploy.
+            </p>
+          </div>
+        </section>
+      )}
+
       {/* Grid */}
       <section className="px-4 pb-20 max-w-7xl mx-auto">
-        {logos.length === 0 ? (
+        {!errorMessage && logos.length === 0 ? (
           <div className="text-center py-24 text-white/30">
             <p className="text-lg">No logos found.</p>
-            <p className="text-sm mt-2">Check your Google Sheet connection.</p>
+            <p className="text-sm mt-2">Sheet might be empty or range is wrong (Sheet1!A2:L).</p>
           </div>
         ) : (
           <LogoGrid logos={logos} />
